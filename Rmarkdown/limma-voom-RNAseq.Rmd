@@ -1,0 +1,130 @@
+---
+title: "limma-voom-RNAseq"
+author: "Tram"
+date: "2025-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Library Prepare
+
+```{r setup, include=FALSE}
+set.seed(2025)
+options(max.print = 1e7)
+
+library(edgeR)
+library(limma)
+library(ggplot2)
+library(pheatmap)
+library(org.Mm.eg.db)
+library(org.Hs.eg.db)  
+library(clusterProfiler)
+library(tibble)
+library(Cairo)  
+library(dplyr)
+library(GenomicRanges)
+library(biomaRt)
+library(AnnotationHub)
+library(rtracklayer)
+library(ggrepel)
+
+```
+
+## 2. Load and Prepare the Data
+
+```{r load-data}
+
+counts <- read.csv("/storage/home/tmh6573/STAT555P/RNA-data.csv", row.names = 1)
+gene_annot <- read.csv("/storage/home/tmh6573/STAT555P/gene-id.csv")
+
+gene_length <- counts$length
+count_matrix <- counts[, -1] 
+
+group <- factor(c("HSC", "HSC", "CMP", "CMP", "CFUE", "CFUE", "Ery", "Ery"))
+dge <- DGEList(counts = count_matrix, group = group)
+
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+dge <- calcNormFactors(dge)
+```
+
+## 3a. Differential Expression (HSC vs Ery, pair 14)
+
+```{r prepare-data}
+
+counts_hsc_ery <- count_matrix[, c(1,2,7,8)]
+counts_hsc_ery[, 1:4] <- counts_hsc_ery[, 1:4] + 0.5
+group_hsc_ery <- factor(c("HSC", "HSC", "Ery", "Ery"))  
+
+dge_hsc_ery <- DGEList(counts = counts_hsc_ery, group = group_hsc_ery)
+dge_hsc_ery <- calcNormFactors(dge_hsc_ery)
+
+# Filter by mean CPM > 2
+cpm_vals <- cpm(dge_hsc_ery)
+keep <- rowMeans(cpm_vals) > 2
+dge_hsc_ery <- dge_hsc_ery[keep, , keep.lib.sizes = FALSE]
+
+dge_hsc_ery <- calcNormFactors(dge_hsc_ery)
+
+design <- model.matrix(~ group_hsc_ery)
+
+CairoPNG("voom_plot.png", width = 1000, height = 800)
+v <- voom(dge_hsc_ery, design, plot = TRUE)
+dev.off()
+
+fit <- lmFit(v, design)
+fit <- eBayes(fit)
+res <- topTable(fit, coef=2, number=Inf, sort.by="P")
+
+res$gene_id <- rownames(res)
+res <- merge(res, gene_annot, by.x="gene_id", by.y="id", all.x=TRUE)
+
+head(res[order(res$adj.P.Val), ])
+res_filtered <- res[res$padj < 0.05, ]
+res_filtered 
+
+write.csv(res_filtered, "limma_rna_regions.csv", row.names = FALSE)
+
+```
+
+## 4. Functional Annotation with GO
+
+```{r}
+
+de_genes <- res[res$adj.P.Val < 0.05, ]
+gene_symbols <- unique(na.omit(de_genes$gene))
+
+entrez_ids <- bitr(gene_symbols, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+
+go_results <- enrichGO(gene = entrez_ids$ENTREZID,
+                       OrgDb = org.Mm.eg.db,
+                       keyType = "ENTREZID",
+                       ont = "BP", 
+                       pAdjustMethod = "BH",
+                       qvalueCutoff = 0.05,
+                       readable = TRUE)
+
+CairoPNG("go_enrichment.png", width = 1000, height = 800)
+barplot(go_results, showCategory=10, title="GO Enrichment for DE Genes (HSC vs Ery)")
+dev.off()
+
+```
+
+## 5. Hierarchical Clustering of All Samples
+
+```{r}
+
+design_all <- model.matrix(~group)
+v_all <- voom(dge, design_all, plot=FALSE)
+
+dist_matrix <- dist(t(v_all$E))
+clustering <- hclust(dist_matrix)
+
+CairoPNG("hierarchical_clustering.png", width = 1000, height = 800)
+plot(clustering, main="Hierarchical Clustering of All Samples", xlab="", sub="", ylab="Distance")
+dev.off()
+
+```
