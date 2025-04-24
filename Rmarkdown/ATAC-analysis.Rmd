@@ -1,0 +1,524 @@
+---
+title: "555 Project - ATAC-seq"
+author: "Jin Peng"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-03-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# 14, 24, 34, 12, 13, 23
+```
+
+## ATAC-seq
+
+```{r, messgae=F, include=F}
+set.seed(2025)
+options(max.print = 1e7)
+
+library(EnvStats)
+library(MASS)
+library(knitr)
+library(tidyr)
+library(ggplot2)
+library(expm)
+library(Matrix)
+library(emmeans)
+library(UsingR)
+library(dplyr)
+library(devtools)
+library(rafalib)
+library(GSE5859Subset)
+library(genefilter)
+library(qvalue)
+library(GenomicRanges)
+library(GenomicAlignments)
+library(DESeq2)
+library(limma)
+library(edgeR)
+library(reshape2)
+library(pander)
+library(Hmisc)
+library(pastecs)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(clusterProfiler)
+library(ReactomePA)
+library(pheatmap)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(MAnorm2)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(org.Mm.eg.db)
+library(EnhancedVolcano)
+```
+
+### Data Preprocessing
+
+```{r}
+# Load Data
+atac_data <- read.table('~/Desktop/555/proj/ATAC-seq-data.xls', header = TRUE)
+
+# Remove all the rows where not a single sample has more than 50 reads.
+# refer to: https://tobiasrausch.com/courses/atac/atac-seq-data-analysis.html#removing-missing-peaks
+atac_data <- na.omit(atac_data)
+atac_data <- atac_data[apply(atac_data[, 4:ncol(atac_data)], 1, max) > 50,]
+```
+
+```{r}
+# Convert the data into a GRanges object
+peaks_gr <- GRanges(seqnames = atac_data$chrom,
+                    ranges = IRanges(start = atac_data$start , end = atac_data$end))
+
+# Obtain gene annotations and define promoter regions (TSS ±3000 bp)
+genes_gr <- genes(TxDb.Hsapiens.UCSC.hg38.knownGene)
+promoter_gr <- promoters(genes_gr, upstream = 3000, downstream = 3000)
+
+# Find overlaps between ATAC-seq peaks and promoter regions
+peaks_in_promoters <- subsetByOverlaps(peaks_gr, promoter_gr)
+overlap_hits <- findOverlaps(peaks_gr, promoter_gr)
+filtered_peaks <- peaks_in_promoters
+```
+
+```{r}
+df_promoters <- as.data.frame(filtered_peaks)
+head(df_promoters)
+names(df_promoters)[names(df_promoters) == "seqnames"] <- "chrom"
+head(df_promoters)
+df_merged <- merge(atac, df_promoters, by = c("chrom", "start", "end"))
+head(df_merged)
+atac <- df_merged
+atac[, 4:19] <- atac[, 4:19] + 1
+```
+
+
+```{r}
+# heteroscedasticity
+rowsummary = data.frame(rowmeans = apply(atac[, 4:19], 1, mean), rowsds = apply(atac[, 4:19], 1, sd))
+ggplot(data=rowsummary, aes(x=rowmeans, y=rowsds)) + geom_point() + xlab("Peak means") + ylab("Peak SDs")
+```
+
+### Data Normalization
+
+```{r}
+# refer to: https://hds-sandbox.github.io/bulk_RNAseq_course/develop/05c_count_normalization.html
+
+# Define design matrix
+counts <- atac[, 4:11]
+design <- data.frame(row.names = colnames(atac[, 4:11]),
+                     celltype = factor(rep(c("HSC", "CMP", "CFUE", "Ery"), each = 2)))
+# Create DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = design,
+                              design = ~celltype)
+dds <- DESeq(dds)
+# Normalize data
+cm <- data.frame(counts(dds, normalized=TRUE))
+rownames(cm) <- paste0(atac$chrom, '_', atac$start, '_', atac$end)
+```
+
+### Data visualization
+
+```{r}
+lf = melt(cm, id.vars=c())
+# Boxplots of normalized counts (display the counts with bars)
+ggplot(data=lf, aes(x=variable, y=value)) + geom_boxplot(aes(group=variable)) + xlab("Sample") + ylab("Normalized Count") + coord_flip() + ggtitle("Boxplots of normalized read counts")
+# Boxplots of log-transformed normalized counts
+ggplot(data=lf, aes(x=variable, y=log(value)+1)) + geom_boxplot(aes(group=variable)) + xlab("Sample") + ylab("Normalized Count") + coord_flip() 
+# Frequency polygons of normalized counts (display the counts with lines)
+ggplot(data=lf, aes(x=value)) + geom_freqpoly(aes(group=variable, color=variable), bins=30) + xlab("Sample") + ylab("Normalized Count")
+```
+
+### PCA
+
+```{r}
+pca = prcomp(t(cm))
+pcaData = as.data.frame(pca$x)
+pcaData$sample=rownames(pcaData)
+pcaData=cbind(pcaData, design)
+percentVar = round(100 * (pca$sdev^2 / sum( pca$sdev^2 ) ))
+
+# PCA plot (PC1 vs PC2)
+p=ggplot(pcaData, aes(x = PC1, y = PC2, color = celltype)) + geom_point(size=2) 
+p=p+xlab(paste0("PC1: ", percentVar[1], "% variance"))
+p=p+ylab(paste0("PC2: ", percentVar[2], "% variance"))
+print(p + ggtitle("PCA plot of normalized read counts (first two components)") )
+# PCA plot (PC3 vs PC4)
+q=ggplot(data=pcaData, aes(x = PC3, y = PC4, color=celltype)) + geom_point(size=2)
+q=q+xlab(paste0("PC3: ", percentVar[3], "% variance"))
+q=q+ylab(paste0("PC4: ", percentVar[4], "% variance"))
+print(q)
+```
+
+```{r}
+# The proportion of variance explained by each PC
+varexp = data.frame(x=1:length(percentVar), y=percentVar)
+varexp$x = factor(varexp$x)
+ggplot(data=varexp, aes(x=x, y=y)) + geom_bar(stat="identity") + xlab("Principal Component") + ylab("Proportion of variation (%)")
+```
+
+#### 14 HSC vs Erythroblast
+
+```{r}
+# intersected with promoters
+res = results(dds, contrast=c("celltype", "HSC", "Ery"), alpha = 0.05)
+print(mcols(res, use.names=T))
+print(summary(res))
+# Histogram of the p-values
+hist(res$pvalue, breaks=0:20/20, col="grey50", border="white", xlim=c(0,1), main="Histogram of p-values", xlab="p-value")
+# MA plot of the log-fold changes
+DESeq2::plotMA(res, ylim = c(-5, 5))
+# Volcano Plot
+ggplot(data = res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.5, size = 2, aes(color = ifelse(padj < 0.05, "Significant", "Not significant"))) +
+  scale_color_manual(values = c("black", "red"), guide = FALSE) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change (HSC vs. Ery)", y = "-log10(Adjusted p-value)") +
+  ggtitle("Volcano Plot: Differential Chromatin Patterns (HSC vs. Ery)")
+```
+
+```{r}
+# not intersected with promoters (atac_data)
+design <- data.frame(row.names = colnames(atac_data[,c(4,5,10,11)]),
+                     celltype = factor(rep(c("HSC", "Ery"), each = 2)))
+dds <- DESeqDataSetFromMatrix(countData = atac_data[,c(4,5,10,11)],
+                              colData = design,
+                              design = ~celltype)
+
+dds_chr1 <- DESeq(dds,quiet = TRUE)
+res <- results(dds_chr1)
+print(sum(res$padj < 0.01 & abs(res$log2FoldChange) > 1))
+DESeq2::plotMA(res, ylim = c(-5, 5), main = "MA Plot: Differential Chromatin Patterns (HSC vs. Ery)")
+ggplot(data = res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.5, size = 2, aes(color = ifelse(padj < 0.05, "Significant", "Not significant"))) +
+  scale_color_manual(values = c("black", "red"), guide = FALSE) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change (CFUE vs. Ery)", y = "-log10(Adjusted p-value)") +
+  ggtitle("Volcano Plot: Differential Chromatin Patterns (HSC vs. Ery)")
+sum(res$padj<0.05)
+```
+
+```{r}
+# Get differentially accessible regions
+
+# Filter significant regions with significance level 0.01
+sig_regions <- res[which(res$padj < 0.05), ] 
+sig_regions <- merge(as.data.frame(sig_regions), as.data.frame(atac_data[,1:3]), by.x = "row.names", by.y = "row.names", all.x = TRUE)
+colnames(sig_regions)[1] <- "Region"
+rownames(sig_regions) = paste0(sig_regions$chrom, '_', sig_regions$start, '_', sig_regions$end)
+head(sig_regions)
+length(sig_regions[,1])
+```
+
+```{r}
+# Check upregulated (more accessible) and downregulated (less accessible) regions
+
+upregulated <- sig_regions[sig_regions$log2FoldChange > 1, ]
+head(upregulated)
+length(upregulated[,1])
+downregulated <- sig_regions[sig_regions$log2FoldChange < -1, ]
+head(downregulated)
+length(downregulated[,1])
+```
+
+```{r}
+# genes near the regions that have differential chromatin patterns
+genes_pair_up = dfPA[intersect(rownames(upregulated), rownames(dfPA)), c("geneId","ENSEMBL","SYMBOL", "GENENAME")]
+head(genes_pair_up)
+length(unique(genes_pair_up[,1])) #number of upregulated genes near the regions that have differential chromatin patterns: 705
+genes_pair_down = dfPA[intersect(rownames(downregulated), rownames(dfPA)), c("geneId","ENSEMBL","SYMBOL", "GENENAME")]
+head(genes_pair_down)
+length(unique(genes_pair_down[,1])) #number of downregulated genes: 897
+```
+
+```{r}
+# Extract gene symbols from nearby_genes
+gene_symbols_up <- genes_pair_up$SYMBOL
+gene_symbols_down <- genes_pair_down$SYMBOL
+
+# Perform GO-term analysis
+go_enrich_up <- enrichGO(gene = gene_symbols_up, OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 0.05)
+go_enrich_down <- enrichGO(gene = gene_symbols_down, OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 0.05)
+```
+
+```{r}
+# View the top 10 enriched terms
+head(go_enrich_up, n = 10)
+head(go_enrich_down, n = 10)
+
+# Barplot of top 10 enriched terms
+barplot(go_enrich_up, showCategory=10)
+barplot(go_enrich_down, showCategory=10)
+```
+
+#### Annotate genomic context
+
+```{r}
+#Annotate the genomic context of each peak such as nearby genes a given peak may regulate
+gr = makeGRangesFromDataFrame(atac, keep.extra.columns=T)
+peakAnno = annotatePeak(gr, tssRegion=c(-1000, 1000), TxDb=TxDb.Hsapiens.UCSC.hg19.knownGene, annoDb="org.Hs.eg.db")
+dfPA = as.data.frame(peakAnno)
+rownames(dfPA) = paste0(dfPA$seqnames, '_', dfPA$start, '_', dfPA$end)
+```
+
+```{r}
+loadings = abs(pca$rotation)
+contribution = as.data.frame(sweep(loadings, 2, colSums(loadings), "/"))
+contribution = contribution[with(contribution, order(-PC1)),]
+pander(head(contribution))
+```
+
+#### 24 CMP vs Erythroblast
+
+```{r}
+# intersected with promoters
+design <- data.frame(row.names = colnames(atac[,c(6,7,10,11)]),
+                     celltype = factor(rep(c("CPM", "Ery"), each = 2)))
+dds <- DESeqDataSetFromMatrix(countData = atac[,c(6,7,10,11)],
+                              colData = design,
+                              design = ~celltype)
+
+dds_chr1 <- DESeq(dds,quiet = TRUE)
+res <- results(dds_chr1)
+print(sum(res$padj < 0.01 & abs(res$log2FoldChange) > 1))
+DESeq2::plotMA(res, ylim = c(-5, 5), main = "MA Plot: Differential Chromatin Patterns (CMP vs. Ery)")
+ggplot(data = res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.5, size = 2, aes(color = ifelse(padj < 0.05, "Significant", "Not significant"))) +
+  scale_color_manual(values = c("black", "red"), guide = FALSE) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change (CFUE vs. Ery)", y = "-log10(Adjusted p-value)") +
+  ggtitle("Volcano Plot: Differential Chromatin Patterns (CPM vs. Ery)")
+sum(res$padj<0.05)
+```
+
+```{r}
+# not intersected with promoters (atac_data)
+design <- data.frame(row.names = colnames(atac_data[,c(6,7,10,11)]),
+                     celltype = factor(rep(c("CPM", "Ery"), each = 2)))
+dds <- DESeqDataSetFromMatrix(countData = atac_data[,c(6,7,10,11)],
+                              colData = design,
+                              design = ~celltype)
+
+dds_chr1 <- DESeq(dds,quiet = TRUE)
+res <- results(dds_chr1)
+print(sum(res$padj < 0.01 & abs(res$log2FoldChange) > 1))
+DESeq2::plotMA(res, ylim = c(-5, 5), main = "MA Plot: Differential Chromatin Patterns (CMP vs. Ery)")
+ggplot(data = res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.5, size = 2, aes(color = ifelse(padj < 0.05, "Significant", "Not significant"))) +
+  scale_color_manual(values = c( "black", "red"), guide = FALSE) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change (CFUE vs. Ery)", y = "-log10(Adjusted p-value)") +
+  ggtitle("Volcano Plot: Differential Chromatin Patterns (CPM vs. Ery)")
+sum(res$padj<0.05)
+```
+```{r}
+# Get differentially accessible regions
+
+# Filter significant regions with significance level 0.01
+sig_regions <- res[which(res$padj < 0.05), ] 
+sig_regions <- merge(as.data.frame(sig_regions), as.data.frame(atac_data[,1:3]), by.x = "row.names", by.y = "row.names", all.x = TRUE)
+colnames(sig_regions)[1] <- "Region"
+rownames(sig_regions) = paste0(sig_regions$chrom, '_', sig_regions$start, '_', sig_regions$end)
+head(sig_regions)
+length(sig_regions[,1])
+```
+
+```{r}
+# Check upregulated (more accessible) and downregulated (less accessible) regions
+
+upregulated <- sig_regions[sig_regions$log2FoldChange > 0, ]
+head(upregulated)
+length(upregulated[,1])
+downregulated <- sig_regions[sig_regions$log2FoldChange < 0, ]
+head(downregulated)
+length(downregulated[,1])
+```
+
+```{r}
+# genes near the regions that have differential chromatin patterns
+genes_pair_up = dfPA[intersect(rownames(upregulated), rownames(dfPA)), c("geneId","ENSEMBL","SYMBOL", "GENENAME")]
+head(genes_pair_up)
+length(unique(genes_pair_up[,1])) #number of upregulated genes near the regions that have differential chromatin patterns: 705
+genes_pair_down = dfPA[intersect(rownames(downregulated), rownames(dfPA)), c("geneId","ENSEMBL","SYMBOL", "GENENAME")]
+head(genes_pair_down)
+length(unique(genes_pair_down[,1])) #number of downregulated genes: 897
+```
+
+```{r}
+# Extract gene symbols from nearby_genes
+gene_symbols_up <- genes_pair_up$SYMBOL
+gene_symbols_down <- genes_pair_down$SYMBOL
+
+# Perform GO-term analysis
+go_enrich_up <- enrichGO(gene = gene_symbols_up, OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 0.05)
+go_enrich_down <- enrichGO(gene = gene_symbols_down, OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 0.05)
+```
+
+```{r}
+# View the top 10 enriched terms
+head(go_enrich_up, n = 10)
+head(go_enrich_down, n = 10)
+
+# Barplot of top 10 enriched terms
+barplot(go_enrich_up, showCategory=10)
+barplot(go_enrich_down, showCategory=10)
+```
+
+#### 34 CFUE vs Erythroblast
+
+```{r}
+design <- data.frame(row.names = colnames(atac[,c(8:11)]),
+                     celltype = factor(rep(c("CFUE", "Ery"), each = 2)))
+dds <- DESeqDataSetFromMatrix(countData = atac[,c(8:11)],
+                              colData = design,
+                              design = ~celltype)
+
+dds_chr1 <- DESeq(dds,quiet = TRUE)
+res <- results(dds_chr1)
+print(sum(res$padj < 0.05 & abs(res$log2FoldChange) > 1))
+DESeq2::plotMA(res, ylim = c(-5, 5), main = "MA Plot: Differential Chromatin Patterns (CFUE vs. Ery)")
+ggplot(data = res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.5, size = 2, aes(color = ifelse(padj < 0.05, "Significant", "Not significant"))) +
+  scale_color_manual(values = c("black", "red"), guide = FALSE) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change (CFUE vs. Ery)", y = "-log10(Adjusted p-value)") +
+  ggtitle("Volcano Plot: Differential Chromatin Patterns (CFUE vs. Ery)") + ylim(0,10)
+```
+
+```{r}
+# Get differentially accessible regions
+
+# Filter significant regions with significance level 0.01
+sig_regions <- res[which(res$padj < 0.05), ] 
+sig_regions <- merge(as.data.frame(sig_regions), as.data.frame(atac[,1:3]), by.x = "row.names", by.y = "row.names", all.x = TRUE)
+colnames(sig_regions)[1] <- "Region"
+rownames(sig_regions) = paste0(sig_regions$chrom, '_', sig_regions$start, '_', sig_regions$end)
+head(sig_regions)
+length(sig_regions[,1])
+
+write.csv(sig_regions, "sig_regions_34.csv", row.names = FALSE)
+```
+
+```{r}
+# Not intersected with promoters (atac_data)
+design <- data.frame(row.names = colnames(atac_data[,c(8:11)]),
+                     celltype = factor(rep(c("CFUE", "Ery"), each = 2)))
+dds <- DESeqDataSetFromMatrix(countData = atac_data[,c(8:11)],
+                              colData = design,
+                              design = ~celltype)
+
+dds_chr1 <- DESeq(dds,quiet = TRUE)
+res <- results(dds_chr1)
+print(sum(res$padj < 0.01 & abs(res$log2FoldChange) > 1))
+DESeq2::plotMA(res, ylim = c(-5, 5))
+ggplot(data = res, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.5, size = 2, aes(color = ifelse(padj < 0.05, "Significant", "Not significant"))) +
+  scale_color_manual(values = c( "black", "red"), guide = FALSE) +
+  theme_minimal() +
+  labs(x = "Log2 Fold Change (CFUE vs. Ery)", y = "-log10(Adjusted p-value)") +
+  ggtitle("Volcano Plot: Differential Chromatin Patterns (CFUE vs. Ery)")
+sum(res$padj<0.05)
+```
+
+```{r}
+# Get differentially accessible regions
+
+# Filter significant regions with significance level 0.01
+sig_regions <- res[which(res$padj < 0.05), ] 
+sig_regions <- merge(as.data.frame(sig_regions), as.data.frame(atac_data[,1:3]), by.x = "row.names", by.y = "row.names", all.x = TRUE)
+colnames(sig_regions)[1] <- "Region"
+rownames(sig_regions) = paste0(sig_regions$chrom, '_', sig_regions$start, '_', sig_regions$end)
+head(sig_regions)
+length(sig_regions[,1])
+```
+
+```{r}
+# Check upregulated (more accessible) and downregulated (less accessible) regions
+
+upregulated <- sig_regions[sig_regions$log2FoldChange > 0, ]
+head(upregulated)
+length(upregulated[,1])
+downregulated <- sig_regions[sig_regions$log2FoldChange < 0, ]
+head(downregulated)
+length(downregulated[,1])
+```
+
+```{r}
+# genes near the regions that have differential chromatin patterns
+genes_pair_up = dfPA[intersect(rownames(upregulated), rownames(dfPA)), c("geneId","ENSEMBL","SYMBOL", "GENENAME")]
+head(genes_pair_up)
+length(unique(genes_pair_up[,1])) #number of upregulated genes near the regions that have differential chromatin patterns: 705
+genes_pair_down = dfPA[intersect(rownames(downregulated), rownames(dfPA)), c("geneId","ENSEMBL","SYMBOL", "GENENAME")]
+head(genes_pair_down)
+length(unique(genes_pair_down[,1])) #number of downregulated genes: 897
+```
+
+```{r}
+# Extract gene symbols from nearby_genes
+gene_symbols_up <- genes_pair_up$SYMBOL
+gene_symbols_down <- genes_pair_down$SYMBOL
+
+# Perform GO-term analysis
+go_enrich_up <- enrichGO(gene = gene_symbols_up, OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 0.05)
+go_enrich_down <- enrichGO(gene = gene_symbols_down, OrgDb = org.Mm.eg.db, keyType = "SYMBOL", ont = "BP", pvalueCutoff = 0.05)
+```
+
+```{r}
+# View the top 10 enriched terms
+head(go_enrich_up, n = 10)
+head(go_enrich_down, n = 10)
+
+# Barplot of top 10 enriched terms
+barplot(go_enrich_up, showCategory=10)
+barplot(go_enrich_down, showCategory=10)
+```
+
+
+### Question 8
+
+```{r}
+# refer to: https://hds-sandbox.github.io/bulk_RNAseq_course/develop/05c_count_normalization.html
+
+# Define design matrix
+counts <- atac[, 4:11]
+design <- data.frame(row.names = colnames(atac[, 4:11]),
+                     celltype = factor(rep(c("HSC", "CMP", "CFUE", "Ery"), each = 2)))
+# Create DESeqDataSet object
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = design,
+                              design = ~celltype)
+dds <- DESeq(dds)
+# Normalize data
+cm <- data.frame(counts(dds, normalized=TRUE))
+rownames(cm) <- paste0(atac$chrom, '_', atac$start, '_', atac$end)
+```
+
+```{r}
+res_all = results(dds)
+print(mcols(res_all, use.names=T))
+```
+
+```{r}
+# Hierarchical Tree for ATAC-seq data
+dist_matrix <- dist(t(assay(dds)))
+hc <- hclust(dist_matrix)
+plot(hc)
+# It seems like HSC & CMP are similar, and CFUE & ERY are similar
+```
+
+```{r}
+# Clustering Analysis
+
+# Differential peak calling
+# refer to: https://tobiasrausch.com/courses/atac/atac-seq-data-analysis.html#differential-peak-calling
+mat = cm[which(res_all$padj < 0.01 & abs(res_all$log2FoldChange) > 1),]
+mat = mat - rowMeans(mat)
+CellTypes = colData(dds)[, c("celltype")]
+anno = as.data.frame(CellTypes)
+rownames(mat) = NULL
+row.names(anno) <- colnames(mat)
+pheatmap(mat, annotation_col = anno, scale="row", main = "Hierarchical Tree (ATAC-seq)")
+
+#promotor active signal strong, genes already expressed
+```
