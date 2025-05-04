@@ -1,0 +1,747 @@
+---
+title: "Project STAT 555"
+author: "Antara"
+date: "2025-03-28"
+output: html_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Required Libraries
+```{r}
+library(readr)
+library(DESeq2)
+library(tximport)
+library(biomaRt)
+library(apeglm)
+library(pheatmap)
+library(clusterProfiler)
+library(ggplot2)
+library(ggrepel)
+library(tidyverse)
+library(EnhancedVolcano)
+```
+
+# File Input
+```{r}
+
+HSC_1 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/HSC_R1.tsv")
+HSC_2 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/HSC_R2.tsv")
+CMP_1 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/CMP_R1.tsv")
+CMP_2 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/CMP_R2.tsv")
+CFUE_1 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/CFU_R1.tsv")
+CFUE_2 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/CFU_R2.tsv")
+ERY_1 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/Erythro_R1.tsv")
+ERY_2 <- read_tsv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/Erythro_R2.tsv")
+
+files <- c("HSC_1", "HSC_2", "CMP_1", "CMP_2", "CFUE_1", "CFUE_2", "ERY_1", "ERY_2")
+count_list <- list()
+lengths <- NULL
+
+for (i in files) {
+  sample_name <- files[i]
+  
+  df <- 
+  df <- df[, c("gene_id", "length", "expected_count")]
+  colnames(df)[3] <- sample_name  # rename 'expected_count' to sample name
+  
+  # Save gene lengths from first file
+  if (is.null(lengths)) {
+    lengths <- df[, c("gene_id", "length")]
+  }
+
+# CODE REQUIRED FOR THIS CONVERSION!!!!!!!!
+
+tx2gene <- read.csv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/gene-id.csv", row.names = 1)
+RNA_data <- read.csv("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/RNA-data.csv", row.names=1)
+
+# raw count data
+gene_raw <- RNA_data[-1]
+
+# Pseudo-Counts
+gene_raw <- gene_raw + 1
+
+# metadata
+coldata <- read.delim("D:/Antara/PSU/Coursework/Project Stat555/ENCODE Files/coldata.txt", row.names=1)
+```
+
+# HSC vs Erythroblast
+```{r}
+gene_raw_14 <- gene_raw[,c(1,2,7,8)]
+coldata_14 <- coldata %>%
+  filter(condition == "HSC" | condition == "Erythroblast")
+
+# DESeqDataSet
+
+dds_14 <- DESeqDataSetFromMatrix(countData = round(gene_raw_14),
+                              colData = coldata_14,
+                              design = ~ condition)
+colnames(dds_14)
+
+# Pre-Filtering
+keep <- rowSums(counts(dds_14)) >= 10
+dds_14 <- dds_14[keep,]
+
+# Differential Expression
+dds_14 <- DESeq(dds_14)
+resultsNames(dds_14)
+
+#LFC Shrinkage
+resLFC_14 <- lfcShrink(dds_14, coef = "condition_HSC_vs_Erythroblast", type = "apeglm")
+#resLFC_14 <- results(dds_14, contrast = c("condition", "HSC", "Erythroblast"))
+summary(resLFC_14)
+resLFC_14
+
+# MA Plot
+#plotMA(resLFC_14, ylim = c(-2,2), main = "MA Plot HSC vs Erythroblast")
+
+# Plot Counts
+Counts <- plotCounts(dds_14, gene = which.min(resLFC_14$padj), intgroup = "condition",
+                     returnData = T)
+ggplot(Counts, aes(x = condition, y = count))+
+  geom_point(position = position_jitter(w=0.1, h=0), size = 3) +
+  ggtitle("Differential Counts - Erythroblast vs HSC") + 
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# Adjusted p-value < 0.05
+# Absolute log2 fold change > 1 (i.e. fold change > 2)
+sig_genes_14 <- resLFC_14[which(resLFC_14$padj < 0.05 & abs(resLFC_14$log2FoldChange) > 1), ]
+dim(sig_genes_14)
+sig_genes_14 <- sig_genes_14[order(sig_genes_14$padj), ]
+sig_genes_14
+
+# Filter Differentially Expressed Genes
+sig_genes_14
+gene_names_14 <- rownames(sig_genes_14)
+
+# QUESTION 1 ------------------------------------------
+
+mart <- useEnsembl(biomart = "ensembl", dataset = "mmusculus_gene_ensembl")
+gene_mapping <- getBM(attributes = c("ensembl_gene_id", "external_gene_name"),
+                      filters = "ensembl_gene_id", values = rownames(resLFC_14), mart = mart)
+
+resLFC_14$gene_id <- rownames(resLFC_14)
+
+resLFC_14 <- left_join(data.frame(resLFC_14), gene_mapping, by = c("gene_id" = "ensembl_gene_id"))
+resLFC_14$gene <- ifelse(is.na(resLFC_14$external_gene_name), resLFC_14$gene_id, resLFC_14$external_gene_name)
+
+# Correcting for P value = 0 due to machine precision
+resLFC_14$padj[resLFC_14$padj == 0] <- 1e-300
+resLFC_14$pvalue[resLFC_14$pvalue == 0] <- 1e-300
+
+significant_genes_14 <- resLFC_14 %>% filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+# Recompute top 10 labels with gene names
+top_labels_14 <- significant_genes_14 %>% slice_min(padj, n = 10)
+
+ggplot(resLFC_14, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.1) +
+  ylim(0, 350) +
+  geom_point(data = significant_genes_14, color = "red", alpha = 0.6) +
+  geom_text_repel(data = top_labels_14, aes(label = gene), size = 5, max.overlaps = 20) +
+  theme_bw() +
+  ggtitle("Volcano Plot: HSC vs Erythroblast") +
+  labs(x = "log2 Fold Change", y = "-log10 Adjusted P-Value") + 
+    theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+
+
+
+# QUESTION 2 ------------------------------------------
+
+# Gene Ontology Analysis
+GO_results_14 <- enrichGO(gene = gene_names_14,
+                       OrgDb = "org.Mm.eg.db",
+                       keyType = "ENSEMBL",
+                       ont = "BP")
+
+head(GO_results_14)
+
+# Visualization
+barplot(GO_results_14, showCategory = 10, main ="Gene Ontology HSC vs Erythroblast")
+
+```
+# CMP vs Erythroblast
+
+```{r}
+gene_raw_24 <- gene_raw[,c(3,4,7,8)]
+coldata_24 <- coldata %>%
+  filter(condition == "CMP" | condition == "Erythroblast")
+
+# DESeqDataSet
+
+dds_24 <- DESeqDataSetFromMatrix(countData = round(gene_raw_24),
+                              colData = coldata_24,
+                              design = ~ condition)
+colnames(dds_24)
+
+# Pre-Filtering
+keep <- rowSums(counts(dds_24)) >= 10
+dds_24 <- dds_24[keep,]
+
+# Differential Expression
+dds_24 <- DESeq(dds_24)
+resultsNames(dds_24)
+
+#LFC Shrinkage
+resLFC_24 <- lfcShrink(dds_24, coef = "condition_Erythroblast_vs_CMP", type = "apeglm")
+#resLFC_24 <- results(dds_24, contrast = c("condition", "CMP", "Erythroblast"))
+summary(resLFC_24)
+resLFC_24
+
+# MA Plot
+#plotMA(resLFC_24, ylim = c(-2,2), main = "MA Plot CMP vs Erythroblast")
+
+# Plot Counts
+Counts <- plotCounts(dds_24, gene = which.min(resLFC_24$padj), intgroup = "condition",
+                     returnData = T)
+ggplot(Counts, aes(x = condition, y = count))+
+  geom_point(position = position_jitter(w=0.1, h=0), size = 3) +
+  ggtitle("Differential Counts - Erythroblast vs CMP") + 
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+
+# Adjusted p-value < 0.05
+# Absolute log2 fold change > 1 (i.e. fold change > 2)
+sig_genes_24 <- resLFC_24[which(resLFC_24$padj < 0.05 & abs(resLFC_24$log2FoldChange) > 1), ]
+dim(sig_genes_24)
+sig_genes_24 <- sig_genes_24[order(sig_genes_24$padj), ]
+sig_genes_24
+
+#write.csv(sig_genes_24, file = "D:/Antara/PSU/Coursework/Project Stat555/Sig_genes_2v4.csv")
+
+# Filter Differentially Expressed Genes
+sig_genes_24
+gene_names_24 <- rownames(sig_genes_24)
+
+# QUESTION 1 ------------------------------------------
+
+resLFC_24$gene_id <- rownames(resLFC_24)
+
+resLFC_24 <- left_join(data.frame(resLFC_24), gene_mapping, by = c("gene_id" = "ensembl_gene_id"))
+resLFC_24$gene <- ifelse(is.na(resLFC_24$external_gene_name), resLFC_24$gene_id, resLFC_24$external_gene_name)
+
+# Correcting for P value = 0 due to machine precision
+resLFC_24$padj[resLFC_24$padj == 0] <- 1e-300
+resLFC_24$pvalue[resLFC_24$pvalue == 0] <- 1e-300
+
+significant_genes_24 <- resLFC_24 %>% filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+# Recompute top 10 labels with gene names
+top_labels_24 <- significant_genes_24 %>% slice_min(padj, n = 10)
+
+# Volcano Plot
+
+ggplot(resLFC_24, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.1) +
+  ylim(0, 400) +
+  geom_point(data = significant_genes_24, color = "red", alpha = 0.6) +
+  geom_text_repel(data = top_labels_24, aes(label = gene), size = 5, max.overlaps = 20) +
+  theme_bw() +
+  labs(title = "Volcano Plot: Erythroblast vs CMP",
+       x = "log2 Fold Change", y = "-log10 Adjusted P-Value") +
+   theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# QUESTION 2 ------------------------------------------
+
+# Gene Ontology Analysis
+GO_results_24 <- enrichGO(gene = gene_names_24,
+                       OrgDb = "org.Mm.eg.db",
+                       keyType = "ENSEMBL",
+                       ont = "BP")
+
+head(GO_results_24)
+
+# Visualization
+barplot(GO_results_24, showCategory = 10, width = 20, main = "GO HSC vs CFUE")
+
+```
+
+# CFUE vs Erythroblast
+```{r}
+gene_raw_34 <- gene_raw[,c(5,6,7,8)]
+coldata_34 <- coldata %>%
+  filter(condition == "CFUE" | condition == "Erythroblast")
+
+# DESeqDataSet
+
+dds_34 <- DESeqDataSetFromMatrix(countData = round(gene_raw_34),
+                              colData = coldata_34,
+                              design = ~ condition)
+colnames(dds_34)
+
+# Pre-Filtering
+keep <- rowSums(counts(dds_34)) >= 10
+dds_34 <- dds_34[keep,]
+
+# Differential Expression
+dds_34 <- DESeq(dds_34)
+resultsNames(dds_34)
+
+#LFC Shrinkage
+resLFC_34 <- lfcShrink(dds_34, coef = "condition_Erythroblast_vs_CFUE", type = "apeglm")
+summary(resLFC_34)
+resLFC_34
+
+# MA Plot
+#plotMA(resLFC_34, ylim = c(-2,2), main = "MA Plot CFUE vs Erythroblast") # ALSO DO VOLCANO PLOT
+
+# Plot Counts
+Counts <- plotCounts(dds_34, gene = which.min(resLFC_34$padj), intgroup = "condition",
+                     returnData = T)
+ggplot(Counts, aes(x = condition, y = count))+
+  geom_point(position = position_jitter(w=0.1, h=0), size = 3)+
+  ggtitle("Differential Counts - Erythroblast vs CFUE") + 
+   theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# Adjusted p-value < 0.05
+# Absolute log2 fold change > 1 (i.e. fold change > 2)
+sig_genes_34 <- resLFC_34[which(resLFC_34$padj < 0.05 & abs(resLFC_34$log2FoldChange) > 1), ]
+dim(sig_genes_34)
+sig_genes_34 <- sig_genes_34[order(sig_genes_34$padj), ]
+sig_genes_34
+
+#write.csv(sig_genes_34, file = "D:/Antara/PSU/Coursework/Project Stat555/Sig_genes_3v4.csv")
+
+# Filter Differentially Expressed Genes
+sig_genes_34
+gene_names_34 <- rownames(sig_genes_34)
+
+# QUESTION 1 ------------------------------------------
+
+resLFC_34$gene_id <- rownames(resLFC_34)
+
+resLFC_34 <- left_join(data.frame(resLFC_34), gene_mapping, by = c("gene_id" = "ensembl_gene_id"))
+resLFC_34$gene <- ifelse(is.na(resLFC_34$external_gene_name), resLFC_34$gene_id, resLFC_34$external_gene_name)
+
+# Correcting for P value = 0 due to machine precision
+resLFC_34$padj[resLFC_34$padj == 0] <- 1e-300
+resLFC_34$pvalue[resLFC_34$pvalue == 0] <- 1e-300
+
+significant_genes_34 <- resLFC_34 %>% filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+# Recompute top 10 labels with gene names
+top_labels_34 <- significant_genes_34 %>% slice_min(padj, n = 10)
+
+# Volcano Plot
+
+ggplot(resLFC_34, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.1) +
+  ylim(0, 300) +
+  geom_point(data = significant_genes_34, color = "red", alpha = 0.6) +
+  geom_text_repel(data = top_labels_34, aes(label = gene), size = 5, max.overlaps = 10) +
+  theme_bw() +
+  labs(title = "Volcano Plot: Erythrocyte vs CFUE",
+       x = "log2 Fold Change", y = "-log10 Adjusted P-Value") +
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# QUESTION 2 ------------------------------------------
+
+# Gene Ontology Analysis
+GO_results_34 <- enrichGO(gene = gene_names_34,
+                       OrgDb = "org.Mm.eg.db",
+                       keyType = "ENSEMBL",
+                       ont = "BP")
+
+head(GO_results_34)
+
+# Visualization
+barplot(GO_results_34, showCategory = 10, width = 20, main = "Gene Ontology") # showCategory = 10 means top 10
+```
+
+# HSC vs CMP
+```{r}
+gene_raw_12 <- gene_raw[,c(1,2,3,4)]
+coldata_12 <- coldata %>%
+  filter(condition == "HSC" | condition == "CMP")
+
+# DESeqDataSet
+
+dds_12 <- DESeqDataSetFromMatrix(countData = round(gene_raw_12),
+                              colData = coldata_12,
+                              design = ~ condition)
+colnames(dds_12)
+
+# Pre-Filtering
+keep <- rowSums(counts(dds_12)) >= 10
+dds_12 <- dds_12[keep,]
+
+# Differential Expression
+dds_12 <- DESeq(dds_12)
+resultsNames(dds_12)
+
+#LFC Shrinkage
+resLFC_12 <- lfcShrink(dds_12, coef = "condition_HSC_vs_CMP", type = "apeglm")
+summary(resLFC_12)
+resLFC_12
+
+# Plot Counts
+Counts <- plotCounts(dds_12, gene = which.min(resLFC_12$padj), intgroup = "condition",
+                     returnData = T)
+ggplot(Counts, aes(x = condition, y = count))+
+  geom_point(position = position_jitter(w=0.1, h=0), size = 3)+
+  ggtitle("Differential Counts - HSC vs CMP") + 
+   theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# Adjusted p-value < 0.05
+# Absolute log2 fold change > 1 (i.e. fold change > 2)
+sig_genes_12 <- resLFC_12[which(resLFC_12$padj < 0.05 & abs(resLFC_12$log2FoldChange) > 1), ]
+dim(sig_genes_12)
+sig_genes_12 <- sig_genes_12[order(sig_genes_12$padj), ]
+sig_genes_12
+
+write.csv(sig_genes_12, file = "D:/Antara/PSU/Coursework/Project Stat555/Sig_genes_1v2.csv")
+
+# Filter Differentially Expressed Genes
+sig_genes_12
+gene_names_12 <- rownames(sig_genes_12)
+
+# QUESTION 1 ------------------------------------------
+
+resLFC_12$gene_id <- rownames(resLFC_12)
+
+resLFC_12 <- left_join(data.frame(resLFC_12), gene_mapping, by = c("gene_id" = "ensembl_gene_id"))
+resLFC_12$gene <- ifelse(is.na(resLFC_12$external_gene_name), resLFC_12$gene_id, resLFC_12$external_gene_name)
+
+# Correcting for P value = 0 due to machine precision
+resLFC_12$padj[resLFC_12$padj == 0] <- 1e-300
+resLFC_12$pvalue[resLFC_12$pvalue == 0] <- 1e-300
+
+significant_genes_12 <- resLFC_12 %>% filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+# Recompute top 10 labels with gene names
+top_labels_12 <- significant_genes_12 %>% slice_min(padj, n = 10)
+
+# Volcano Plot
+
+ggplot(resLFC_12, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.1) +
+  ylim(0, 300) +
+  geom_point(data = significant_genes_12, color = "red", alpha = 0.6) +
+  geom_text_repel(data = top_labels_12, aes(label = gene), size = 5, max.overlaps = 20) +
+  theme_bw() +
+  labs(title = "Volcano Plot: HSC vs CMP",
+       x = "log2 Fold Change", y = "-log10 Adjusted P-Value") +
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# QUESTION 2 ------------------------------------------
+
+# Gene Ontology Analysis
+GO_results_12 <- enrichGO(gene = gene_names_12,
+                       OrgDb = "org.Mm.eg.db",
+                       keyType = "ENSEMBL",
+                       ont = "BP")
+
+head(GO_results_12)
+
+# Visualization
+barplot(GO_results_12, showCategory = 10, width = 20, main = "Gene Ontology") # showCategory = 10 means top 10
+
+
+
+```
+
+# HSC vs CFUE
+```{r}
+gene_raw_13 <- gene_raw[,c(1,2,5,6)]
+coldata_13 <- coldata %>%
+  filter(condition == "HSC" | condition == "CFUE")
+
+# DESeqDataSet
+
+dds_13 <- DESeqDataSetFromMatrix(countData = round(gene_raw_13),
+                              colData = coldata_13,
+                              design = ~ condition)
+colnames(dds_13)
+
+# Pre-Filtering
+keep <- rowSums(counts(dds_13)) >= 10
+dds_13 <- dds_13[keep,]
+
+# Differential Expression
+dds_13 <- DESeq(dds_13)
+resultsNames(dds_13)
+
+#LFC Shrinkage
+resLFC_13 <- lfcShrink(dds_13, coef = "condition_HSC_vs_CFUE", type = "apeglm")
+summary(resLFC_13)
+resLFC_13
+
+# MA Plot
+#plotMA(resLFC_13, ylim = c(-2,2), main = "MA Plot CFUE vs Erythrocyte") # ALSO DO VOLCANO PLOT
+
+# Plot Counts
+Counts <- plotCounts(dds_13, gene = which.min(resLFC_13$padj), intgroup = "condition",
+                     returnData = T)
+ggplot(Counts, aes(x = condition, y = count))+
+  geom_point(position = position_jitter(w=0.1, h=0), size = 3)+
+  ggtitle("Differential Counts - CFUE vs HSC") + 
+   theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# Adjusted p-value < 0.05
+# Absolute log2 fold change > 1 (i.e. fold change > 2)
+sig_genes_13 <- resLFC_13[which(resLFC_13$padj < 0.05 & abs(resLFC_13$log2FoldChange) > 1), ]
+dim(sig_genes_13)
+sig_genes_13 <- sig_genes_13[order(sig_genes_13$padj), ]
+sig_genes_13
+
+write.csv(sig_genes_13, file = "D:/Antara/PSU/Coursework/Project Stat555/Sig_genes_1v3.csv")
+
+# Filter Differentially Expressed Genes
+sig_genes_13
+gene_names_13 <- rownames(sig_genes_13)
+
+# QUESTION 1 ------------------------------------------
+
+resLFC_13$gene_id <- rownames(resLFC_13)
+
+resLFC_13 <- left_join(data.frame(resLFC_13), gene_mapping, by = c("gene_id" = "ensembl_gene_id"))
+resLFC_13$gene <- ifelse(is.na(resLFC_13$external_gene_name), resLFC_13$gene_id, resLFC_13$external_gene_name)
+
+# Correcting for P value = 0 due to machine precision
+resLFC_13$padj[resLFC_13$padj == 0] <- 1e-300
+resLFC_13$pvalue[resLFC_13$pvalue == 0] <- 1e-300
+
+significant_genes_13 <- resLFC_13 %>% filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+# Recompute top 10 labels with gene names
+top_labels_13 <- significant_genes_13 %>% slice_min(padj, n = 10)
+
+# Volcano Plot
+
+ggplot(resLFC_13, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.1) +
+  ylim(0, 300) +
+  geom_point(data = significant_genes_13, color = "red", alpha = 0.6) +
+  geom_text_repel(data = top_labels_13, aes(label = gene), size = 5, max.overlaps = 10) +
+  theme_bw() +
+  labs(title = "Volcano Plot: HSC vs CFUE",
+       x = "log2 Fold Change", y = "-log10 Adjusted P-Value") +
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# QUESTION 2 ------------------------------------------
+
+# Gene Ontology Analysis
+GO_results_13 <- enrichGO(gene = gene_names_13,
+                       OrgDb = "org.Mm.eg.db",
+                       keyType = "ENSEMBL",
+                       ont = "BP")
+
+head(GO_results_13)
+
+# Visualization
+barplot(GO_results_13, showCategory = 10, width = 20, main = "Gene Ontology") # showCategory = 10 means top 10
+
+```
+
+# CMP vs CFUE
+```{r}
+gene_raw_23 <- gene_raw[,c(3,4,5,6)]
+coldata_23 <- coldata %>%
+  filter(condition == "CMP" | condition == "CFUE")
+
+# DESeqDataSet
+
+dds_23 <- DESeqDataSetFromMatrix(countData = round(gene_raw_23),
+                              colData = coldata_23,
+                              design = ~ condition)
+colnames(dds_23)
+
+# Pre-Filtering
+keep <- rowSums(counts(dds_23)) >= 10
+dds_23 <- dds_23[keep,]
+
+# Differential Expression
+dds_23 <- DESeq(dds_23)
+resultsNames(dds_23)
+
+#LFC Shrinkage
+resLFC_23 <- lfcShrink(dds_23, coef = "condition_CMP_vs_CFUE", type = "apeglm")
+summary(resLFC_23)
+resLFC_23
+
+# Plot Counts
+Counts <- plotCounts(dds_23, gene = which.min(resLFC_23$padj), intgroup = "condition",
+                     returnData = T)
+ggplot(Counts, aes(x = condition, y = count))+
+  geom_point(position = position_jitter(w=0.1, h=0), size = 3)+
+  ggtitle("Differential Counts - CFUE vs CMP") + 
+   theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# Adjusted p-value < 0.05
+# Absolute log2 fold change > 1 (i.e. fold change > 2)
+sig_genes_23 <- resLFC_23[which(resLFC_23$padj < 0.05 & abs(resLFC_23$log2FoldChange) > 1), ]
+dim(sig_genes_23)
+sig_genes_23 <- sig_genes_23[order(sig_genes_23$padj), ]
+sig_genes_23
+
+write.csv(sig_genes_23, file = "D:/Antara/PSU/Coursework/Project Stat555/Sig_genes_2v3.csv")
+
+# Filter Differentially Expressed Genes
+sig_genes_23
+gene_names_23 <- rownames(sig_genes_23)
+
+# QUESTION 1 ------------------------------------------
+
+resLFC_23$gene_id <- rownames(resLFC_23)
+
+resLFC_23 <- left_join(data.frame(resLFC_23), gene_mapping, by = c("gene_id" = "ensembl_gene_id"))
+resLFC_23$gene <- ifelse(is.na(resLFC_23$external_gene_name), resLFC_23$gene_id, resLFC_23$external_gene_name)
+
+# Correcting for P value = 0 due to machine precision
+resLFC_23$padj[resLFC_23$padj == 0] <- 1e-300
+resLFC_23$pvalue[resLFC_23$pvalue == 0] <- 1e-300
+
+significant_genes_23 <- resLFC_23 %>% filter(padj < 0.05 & abs(log2FoldChange) > 1)
+
+# Recompute top 10 labels with gene names
+top_labels_23 <- significant_genes_23 %>% slice_min(padj, n = 10)
+
+# Volcano Plot
+
+ggplot(resLFC_23, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(alpha = 0.1) +
+  ylim(0, 300) +
+  geom_point(data = significant_genes_23, color = "red", alpha = 0.6) +
+  geom_text_repel(data = top_labels_23, aes(label = gene), size = 5, max.overlaps = 10) +
+  theme_bw() +
+  labs(title = "Volcano Plot: CMP vs CFUE",
+       x = "log2 Fold Change", y = "-log10 Adjusted P-Value") +
+  theme(plot.title = element_text(size = 20, face = "bold"),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 10))
+
+# QUESTION 2 ------------------------------------------
+
+# Gene Ontology Analysis
+GO_results_23 <- enrichGO(gene = gene_names_23,
+                       OrgDb = "org.Mm.eg.db",
+                       keyType = "ENSEMBL",
+                       ont = "BP")
+
+head(GO_results_23)
+
+# Visualization
+barplot(GO_results_23, showCategory = 10, width = 20, main = "Gene Ontology") # showCategory = 10 means top 10
+
+ggsave("D:/Antara/PSU/Coursework/Project Stat555/RNA-seq Plots/GO_2v3.png")
+
+```
+
+# Hierarchical Clustering
+
+```{r}
+# DESeqDataSet
+
+dds <- DESeqDataSetFromMatrix(countData = round(gene_raw),
+                              colData = coldata,
+                              design = ~ condition)
+colnames(dds)
+
+# Relevel the reference cell line due to the pairs assigned
+dds$condition <- relevel(dds$condition, ref = "Erythrocyte")
+
+# Pre-Filtering
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+# Differential Expression
+dds <- DESeq(dds)
+resultsNames(dds)
+
+# Heatmap
+deseq2VST <- vst(dds)
+deseq2VST <- assay(deseq2VST)
+deseq2VST <- as.data.frame(deseq2VST)
+deseq2VST$Gene <- rownames(deseq2VST)
+head(deseq2VST)
+
+Res1 <- results(dds, contrast = c("condition", "HSC", "Erythrocyte"))
+Res2 <- results(dds, contrast = c("condition", "CFUE", "Erythrocyte"))
+Res3 <- results(dds, contrast = c("condition", "CMP", "Erythroblast"))
+
+sig_1v4 <- rownames(Res1[which(Res1$padj < 0.05 & abs(Res1$log2FoldChange) > 1), ])
+sig_2v4 <- rownames(Res2[which(Res2$padj < 0.05 & abs(Res2$log2FoldChange) > 1), ])
+sig_3v4 <- rownames(Res3[which(Res3$padj < 0.05 & abs(Res3$log2FoldChange) > 1), ])
+
+sig_genes <- unique(c(sig_1v4, sig_2v4, sig_3v4))
+
+deseq2VST <- deseq2VST[deseq2VST$Gene %in% sig_genes,]
+
+#write.csv(sig_genes, file = "D:/Antara/PSU/Coursework/Project Stat555/Sig_genes_all.csv")
+
+# Assume deseq2VST is a data frame or matrix with genes in rows, samples in columns
+scaled_mat <- t(scale(t(deseq2VST[ , -9])))  # <- this standardizes rows
+
+# Check if the scaling worked
+summary(scaled_mat[1, ])
+
+
+# Convert the VST counts to long format for ggplot2
+#library(reshape2)
+#library(viridis)
+
+# Now overwrite our original data frame with the long format
+#deseq2VST_long <- melt(deseq2VST, id.vars=c("Gene"))
+
+# Make a heatmap
+#heatmap <- ggplot(deseq2VST_long, aes(x=variable, y=Gene, fill=value)) + geom_raster() + scale_fill_viridis(trans="sqrt") + theme(axis.text.x=element_text(angle=65, hjust=1), axis.text.y=element_blank(), axis.ticks.y=element_blank())
+#heatmap
+
+library(pheatmap)
+
+# Phylogenetic tree
+
+distanceGene <- dist(deseq2VST)
+dist_matrix <- dist(t(deseq2VST[-9]))
+
+hc <- hclust(dist_matrix, method = "complete")  # or "average", "ward.D2"
+sampleTree = as.dendrogram(hc, method="average")
+
+plot(sampleTree,
+     main = "Sample Clustering",
+     ylab = "Height")
+
+hr <- hclust(distanceGene, method="average")
+geneTree = as.dendrogram(hr, method="average")
+
+plot(geneTree,
+     leaflab = "none",             
+     main = "Gene Clustering",
+     ylab = "Height")
+
+png("D:/Antara/PSU/Coursework/Project Stat555/RNA-seq Plots/Hierarchical_Clustering.png")
+pheatmap(scaled_mat,
+         annotation_col = coldata,
+         show_rownames = FALSE,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         main = "Union of DEGs Across Conditions",
+         color = colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name = "RdBu")))(100))
+dev.off(dev.list()["png"])
+
+
+```
+
