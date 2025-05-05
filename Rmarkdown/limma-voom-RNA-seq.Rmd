@@ -1,0 +1,251 @@
+---
+title: "limma-voom RNA-seq analysis"
+author: "Tram"
+date: "2025-04-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Library Prepare
+
+```{r setup, include=FALSE}
+set.seed(2025)
+options(max.print = 1e7)
+
+library(tidyverse)
+library(VennDiagram)
+library(edgeR)
+library(limma)
+library(ggplot2)
+library(pheatmap)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(tibble)
+library(Cairo)  
+library(dplyr)
+library(GenomicRanges)
+library(biomaRt)
+library(AnnotationHub)
+library(rtracklayer)
+library(ggrepel)
+library(dendextend)
+library(pheatmap)
+```
+
+## Load and Prepare the Data
+
+```{r load-data}
+
+counts <- read.csv("RNA-data.csv", row.names = 1)
+gene_annot <- read.csv("gene-id.csv")
+gene_length <- counts$length
+count_matrix <- counts[, -1] 
+
+group <- factor(c("HSC", "HSC", "CMP", "CMP", "CFUE", "CFUE", "Ery", "Ery"))
+dge <- DGEList(counts = count_matrix, group = group)
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes=FALSE]
+
+dge <- calcNormFactors(dge)
+```
+
+# Differential Expression by limma-voom (for each pair, just change the name and col number)
+
+```{r prepare-data}
+
+counts_pair <- count_matrix[, c(3,4,5,6)]
+counts_pair[, 1:4] <- counts_pair[, 1:4] + 0.5
+group_pair <- factor(c("CMP", "CMP", "CFUE", "CFUE")) 
+
+dge_pair<- DGEList(counts = counts_pair, group = group_pair)
+dge_pair <- calcNormFactors(dge_pair)
+
+# Filter by mean CPM > 2
+cpm_vals <- cpm(dge_pair)
+keep <- rowMeans(cpm_vals) > 2
+dge_pair <- dge_pair[keep, , keep.lib.sizes = FALSE]
+
+# Normalize
+dge_pair <- calcNormFactors(dge_pair)
+design <- model.matrix(~ group_pair)
+
+# voom + plot
+CairoPNG("voom_pair1.png", width = 600, height = 400)
+v <- voom(dge_pair, design, plot = TRUE)
+dev.off()
+
+fit <- lmFit(v, design)
+fit <- eBayes(fit)
+res <- topTable(fit, coef=2, number=Inf, sort.by="P")
+
+res$gene_id <- rownames(res)
+res <- merge(res, gene_annot, by.x="gene_id", by.y="id", all.x=TRUE)
+
+head(res[order(res$adj.P.Val), ])
+res_filtered <- res[res$adj.P.Val < 0.05, ]
+
+```
+
+# Generate Vol plot
+
+```{r}
+# Create a separate copy for plotting
+res_plot <- res_filtered %>%
+  rename(
+    logFC = logFC,
+    pval = adj.P.Val
+  ) %>%
+  mutate(
+    sig = case_when(
+      pval < 0.05 & abs(logFC) > 1 ~ "Significant",
+      TRUE ~ "Not Significant"
+    )
+  )
+
+top_genes <- res_plot %>%
+  filter(pval < 0.01 & abs(logFC) > 2) %>%
+  slice_min(order_by = pval, n = 10)
+
+# Ensure correct data types
+res_plot$logFC <- as.numeric(res_plot$logFC)
+res_plot$pval <- as.numeric(res_plot$pval)
+res_plot$sig <- as.factor(res_plot$sig)
+
+CairoPNG("voom_vol_pair6.png", width = 600, height = 400, res = 150)
+ggplot(res_plot, aes(x = logFC, y = -log10(pval), color = sig)) +
+  geom_point(alpha = 0.6, size = 1) +
+  scale_color_manual(values = c("black", "red")) +
+  labs(
+    title = "Volcano Plot (CMP vs CFUE)",
+    x = "Log2 Fold Change",
+    y = "-Log10 p-value"
+  ) +
+  theme_minimal(base_size = 7) +
+  theme(legend.title = element_blank())
+dev.off()
+
+```
+
+
+# Functional Annotation and GO Analysis
+
+```{r}
+
+de_genes <- res[res$adj.P.Val < 0.05, ]
+gene_symbols <- unique(na.omit(de_genes$gene))
+entrez_ids <- bitr(gene_symbols, fromType="SYMBOL", toType="ENTREZID", OrgDb="org.Mm.eg.db")
+
+go_results <- enrichGO(gene = entrez_ids$ENTREZID,
+                       OrgDb = org.Mm.eg.db,
+                       keyType = "ENTREZID",
+                       ont = "BP", 
+                       pAdjustMethod = "BH",
+                       qvalueCutoff = 0.05,
+                       readable = TRUE)
+
+CairoPNG("limma_GO_pair6.png", width = 700, height = 500)
+dotplot(go_results, showCategory = 10, title = "GO Enrichment for DE Genes (CMP vs CFUE)")
+dev.off()
+
+```
+
+# Hierarchical Clustering of All Samples
+
+```{r}
+
+# Recalculate voom on all samples
+design_all <- model.matrix(~group)
+v_all <- voom(dge, design_all, plot = FALSE)
+
+dist_matrix <- dist(t(v_all$E))
+hc <- hclust(dist_matrix)
+dend <- as.dendrogram(hc)
+new_labels <- c("HSC_1", "HSC_2", "CMP_1", "CMP_2", 
+                "CFUE_1", "CFUE_2", "ERY_1", "ERY_2")
+labels(dend) <- new_labels
+dend <- color_branches(dend, k = 4)       
+dend <- set(dend, "labels_cex", 1.2)
+dend <- set(dend, "branches_lwd", 2)
+
+CairoPNG("clustering_limma.png", width = 600, height = 500)
+par(mar = c(5, 4, 4, 2))  # Customize margins if needed
+plot(dend, main = "Hierarchical Clustering of All Samples (RNA-seq, limma)", cex.main = 1.5)
+dev.off()
+```
+
+# Heatmap for All Samples
+
+```{r}
+
+fit <- lmFit(v_all, design_all)
+fit <- eBayes(fit)
+top_genes <- topTable(fit, coef = 2, number = Inf, adjust.method = "BH")  # Adjust coef if needed
+
+sig_genes <- top_genes[top_genes$adj.P.Val < 0.05, ]
+selected_genes <- rownames(sig_genes)
+
+expr_matrix <- v_all$E[selected_genes, ]
+expr_z <- t(scale(t(expr_matrix)))  # Mean=0, SD=1 per gene
+colnames(expr_z) <- c("HSC_1", "HSC_2", "CMP_1", "CMP_2",
+                      "CFUE_1", "CFUE_2", "ERY_1", "ERY_2")
+
+annotation_col <- data.frame(CellType = group)
+rownames(annotation_col) <- colnames(expr_z)
+
+CairoPNG("heatmap_limma.png", width = 600, height = 500)
+pheatmap(expr_z,
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = NULL, 
+         show_rownames = FALSE,
+         show_colnames = TRUE,
+         fontsize_col = 10,
+         scale = "row",
+         main = "Z-score Heatmap of DE Genes (RNA-seq, limma)")
+dev.off()
+```
+
+# Venn Diagram for limma-voom and DESeq2
+
+```{r}
+
+deseq <- read.csv("Sig_genes_2v3.csv", row.names = 1)  
+deseq <- deseq %>% rownames_to_column(var = "gene_id")
+limma <- res_filtered 
+
+deseq_sig <- deseq %>% filter(padj < 0.05)
+limma_sig <- limma %>% filter(adj.P.Val < 0.05)
+
+deseq_genes <- deseq_sig$gene_id
+limma_genes <- limma_sig$gene_id
+
+CairoPNG("venn_pair6.png", width = 1200, height = 800, res = 150)
+venn.plot <- draw.pairwise.venn(
+  area1 = length(deseq_genes),
+  area2 = length(limma_genes),
+  cross.area = length(intersect(deseq_genes, limma_genes)),
+  category = c("DESeq2", "limma"),
+  fill = c("skyblue", "salmon"),
+  alpha = 0.5,
+  cex = 2,
+  cat.cex = 1.5,
+  lty = "blank"
+)
+grid.newpage()
+grid.draw(venn.plot)
+grid.text("Overlap of DEGs from DESeq2 and limma-voom (CMP & CFUE)", y = 0.95, gp = gpar(fontsize = 16, fontface = "bold"))
+dev.off()
+
+
+#cor_test <- cor.test(merged$log2FoldChange, merged$logFC)
+#print(cor_test)
+#cor_val <- cor(merged$log2FoldChange, merged$logFC)
+
+
+```
+
+
+

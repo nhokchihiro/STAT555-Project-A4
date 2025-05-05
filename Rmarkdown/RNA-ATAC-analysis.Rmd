@@ -1,0 +1,112 @@
+---
+title: "RNA-ATAC-analysis"
+author: "Tram"
+date: "2025-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Library Prepare
+
+```{r setup, include=FALSE}
+set.seed(2025)
+options(max.print = 1e7)
+
+library(edgeR)
+library(limma)
+library(ggplot2)
+library(pheatmap)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(tibble)
+library(Cairo) 
+library(dplyr)
+library(GenomicRanges)
+library(biomaRt)
+library(AnnotationHub)
+library(rtracklayer)
+library(Hmisc)
+library(ggrepel)
+```
+
+## Load and Prepare the Data
+
+```{r load-data}
+
+atac_data <- read.csv("significant_atac_2vs3.csv")
+rna_data <- read.csv("Sig_genes_2v3.csv")
+
+colnames(rna_data)[colnames(rna_data) == "X"] <- "gene_id"
+head(rna_data)
+
+```
+
+## Question 6
+
+```{r}
+mouse <- useEnsembl(biomart = "genes", dataset = "mmusculus_gene_ensembl")
+genes <- getBM(attributes = c("ensembl_gene_id", "external_gene_name", 
+                              "chromosome_name", "start_position", "end_position", "strand"),
+               mart = mouse)
+
+genes <- genes[genes$chromosome_name %in% gsub("chr", "", atac_data$chrom), ]
+genes$chromosome_name <- paste0("chr", genes$chromosome_name)
+
+```
+
+
+```{r}
+
+atac_gr <- GRanges(seqnames = atac_data$chrom,
+                   ranges = IRanges(start = atac_data$start, end = atac_data$end))
+
+gene_gr <- GRanges(seqnames = genes$chromosome_name,
+                   ranges = IRanges(start = genes$start_position, end = genes$end_position),
+                   gene_id = genes$ensembl_gene_id)
+
+nearby <- distanceToNearest(atac_gr, gene_gr, ignore.strand = TRUE)
+
+atac_data$gene_id <- NA
+atac_data$gene_id[queryHits(nearby)] <- mcols(gene_gr[subjectHits(nearby)])$gene_id
+
+```
+
+```{r}
+
+merged <- merge(atac_data, rna_data, by = "gene_id")
+
+# ATAC log2FoldChange.x, RNA log2FoldChange.y
+merged <- merged %>%
+  mutate(
+    quadrant = case_when(
+      log2FoldChange.x > 0 & log2FoldChange.y > 0 ~ "Up-Up",  
+      log2FoldChange.x < 0 & log2FoldChange.y < 0 ~ "Down-Down",
+      TRUE ~ "Other"
+    )
+  )
+
+sig_points <- merged %>% filter(padj.x < 0.05 | padj.y < 0.05)
+non_sig_points <- merged %>% filter(!(padj.x < 0.05 | padj.y < 0.05)) %>% sample_n(size = min(200, n()))
+merged_sampled <- bind_rows(sig_points, non_sig_points)
+
+quadrant_colors <- c("Up-Up" = "#E76F51", "Down-Down" = "#457B9D", "Other" = "gray80")
+
+CairoPNG("ATAC_RNA_pair6.png", width = 600, height = 400, res = 150)
+ggplot(merged_sampled, aes(x = log2FoldChange.x, y = log2FoldChange.y, color = quadrant)) +
+  geom_point(alpha = 0.7, size = 1) +
+  scale_color_manual(values = quadrant_colors) +
+  theme_minimal(base_size = 7) +
+  labs(
+    x = "ATAC log2FoldChange",
+    y = "RNA log2FoldChange",
+    title = "ATAC vs RNA log2 Fold Change (CMP vs CFUE)",
+    color = "Quadrant"
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50")
+dev.off()
+
+```
