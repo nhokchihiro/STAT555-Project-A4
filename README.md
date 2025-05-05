@@ -4,7 +4,7 @@ This project explores the molecular mechanisms driving hematopoietic differentia
 
 ## Objectives
 - Identify differentially expressed genes and accessible chromatin regions.
-- Compare transcriptomic and epigenomic patterns across six developmental transitions.
+- Compare the efficiency of limma-voom and DESeq2.
 - Interpret biological functions through Gene Ontology (GO) analysis.
 
 ## Tools & Methods
