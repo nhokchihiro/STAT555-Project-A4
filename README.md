@@ -20,5 +20,5 @@ Antara Kulkarni
 Jin Peng
 
 ## Course
-STAT 555 – Bioinformatics  
+STAT 555 – Statgenomics  
 April 2025
